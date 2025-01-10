@@ -18,12 +18,12 @@ export KOS_ARCH_DIR="${KOS_BASE}/kernel/arch/${KOS_ARCH}"
 . ${KOS_BASE}/environ_${KOS_ARCH}.sh
 
 # Add the compiler bins dir to the path if it is not already.
-if [[ ":$PATH:" != *":${KOS_CC_BASE}/bin:"* ]]; then
+if ! expr ":$PATH:" : ".*:${KOS_CC_BASE}/bin:.*" > /dev/null ; then
   export PATH="${PATH}:${KOS_CC_BASE}/bin"
 fi
 
 # Add the build wrappers dir to the path if it is not already.
-if [[ ":$PATH:" != *":${KOS_BASE}/utils/build_wrappers:"* ]]; then
+if ! expr ":$PATH:" : ".*:${KOS_BASE}/utils/build_wrappers:.*" > /dev/null ; then
   export PATH="${PATH}:${KOS_BASE}/utils/build_wrappers"
 fi
 
@@ -47,6 +47,7 @@ export KOS_ADDR2LINE="${KOS_CC_BASE}/bin/${KOS_CC_PREFIX}-addr2line"
 export KOS_LD="${KOS_CC_BASE}/bin/${KOS_CC_PREFIX}-ld"
 export KOS_RANLIB="${KOS_CC_BASE}/bin/${KOS_CC_PREFIX}-gcc-ranlib"
 export KOS_STRIP="${KOS_CC_BASE}/bin/${KOS_CC_PREFIX}-strip"
+export KOS_SIZE="${KOS_CC_BASE}/bin/${KOS_CC_PREFIX}-size"
 export KOS_CFLAGS="${KOS_CFLAGS} ${KOS_INC_PATHS} -D_arch_${KOS_ARCH} -D_arch_sub_${KOS_SUBARCH} -Wall -g"
 export KOS_CPPFLAGS="${KOS_CPPFLAGS} ${KOS_INC_PATHS_CPP}"
 
