@@ -84,15 +84,17 @@ __BEGIN_DECLS
 /** \brief  SH4 Timer Channel 1.
 
     \warning
-    This timer channel is free to use.
+    This timer channel is used by the various gettime functions in this header.
+    It also backs the standard C, C++, and POSIX date/time and clock functions.
+    It is used as a free-running counter and is only ever read by KOS, so an
+    application may share it, but must not reload or stop it.
 */
 #define TMU1    1
 
 /** \brief  SH4 Timer Channel 2.
 
     \warning
-    This timer channel is used by the various gettime functions in this header.
-    It also backs the standard C, C++, and POSIX date/time and clock functions.
+    This timer channel is free to use.
 */
 #define TMU2    2
 
@@ -225,11 +227,14 @@ int timer_ints_enabled(int channel);
     APIs. You may wish to favor these for platform independence.
 
     \warning
-    This API and its underlying functionality are using \ref TMU2, so any
+    This API and its underlying functionality are using \ref TMU1, so any
     direct manipulation of it will interfere with the API's proper functioning.
+    \ref TMU1 is read as a free-running 32-bit down-counter: KOS never primes,
+    reloads, stops, or takes interrupts from it, but it must keep running with
+    TCOR1 set to 0xffffffff, and reloading TCNT1 will disturb the uptime.
 
     \note
-    The highest actual tick resolution of \ref TMU2 is 80ns.
+    The highest actual tick resolution of \ref TMU1 is 80ns.
 */
 
 /** \brief   Structure that holds timer values in seconds + ticks. */

@@ -172,72 +172,109 @@ int timer_ints_enabled(int which) {
     return irq_get_priority(IRQ_SRC_TMU0 - which) > 0;
 }
 
-/* Seconds elapsed (since KOS startup), updated from the TMU2 underflow ISR */
-static volatile uint32_t timer_ms_counter = 0;
-/* Max counter value (used as TMU2 reload), to target a 1 second interval */
-static          uint32_t timer_ms_countdown;
+/* Tick rate of a timer channel running at TIMER_TPSC, in Hz. This is the
+   unit of the "ticks" field of timer_val_t, and is what the documented
+   80ns-per-tick conversion in <arch/timer.h> is derived from. */
+#define TIMER_TICK_RATE (TIMER_PCK / TDIV(TIMER_TPSC))
 
-/* TMU2 interrupt handler, called every second. Simply updates our
-   running second counter and clears the underflow flag. */
-static void timer_ms_handler(irq_t source, irq_context_t *context, void *data) {
-    (void)source;
-    (void)context;
-    (void)data;
+/* Largest gap between two consecutive __dreamcast_get_ticks() calls that we
+   are willing to believe. Anything larger is treated as a discontinuity in
+   TMU1 (i.e. something reloaded TCNT1 behind our back) rather than as real
+   elapsed time, and is discarded instead of being accumulated. Without this,
+   a single stray write to TCNT1 would inject up to a full wrap period
+   (~344s) of bogus uptime, which would wreck every timeout in the kernel.
 
-    timer_ms_counter++;
+   Must stay under the wrap period, and the resulting tick count must stay
+   inside 32 bits: 300 * 12468720 = 3740616000, plus a sub-second
+   uptime_ticks, still fits. Note the "u" -- that product overflows a signed
+   int, so the multiplication below has to be unsigned. */
+#define TIMER_MAX_GAP_SECS  300u
 
-    /* Clear overflow bit so we can check it when returning time */
-    TIMER16(tcrs[TMU2]) &= ~UNF;
+/* Uptime since KOS startup, accumulated from TMU1 by __dreamcast_get_ticks().
+   uptime_ticks is always kept below TIMER_TICK_RATE. tmu1_last is the TCNT1
+   value at the time of the last accumulation. */
+static uint32_t uptime_secs;
+static uint32_t uptime_ticks;
+static uint32_t tmu1_last;
+
+/* Set up the uptime clock, which reads TMU1.
+
+   TMU1 is meant to be owned by the application here: a free-running 32-bit
+   down-counter at TIMER_TICK_RATE, started once and never reloaded, with no
+   interrupts. KOS only ever reads TCNT1; it does not prime, reload, stop or
+   take interrupts from this channel. TMU2 is left completely idle and is
+   free for the application to use.
+
+   timer_init() runs before main(), though, so at this point the application
+   has not had a chance to configure TMU1 yet, and a stopped TMU1 would mean
+   a frozen uptime clock for everything that runs during KOS init (the
+   scheduler, and the GD-ROM driver via thd_poll()/cdrom_poll()). So we start
+   it here *only if it is not already running*. An application that wants to
+   own TMU1 can simply leave this configuration alone -- it is exactly the
+   free-running setup described above. */
+static void timer_uptime_enable(void) {
+    if(!timer_running(TMU1)) {
+        /* TCOR1 must be the full 32-bit range: on underflow the hardware
+           reloads TCNT1 from TCOR1, and that reload is what makes the
+           counter wrap cleanly at 2^32 rather than stalling at zero. */
+        TIMER32(tcnts[TMU1]) = 0xffffffff;
+        TIMER32(tcors[TMU1]) = 0xffffffff;
+
+        /* No UNIE: the underflow flag will set every wrap and stay set,
+           which is harmless because we never look at it and the interrupt
+           stays masked. */
+        TIMER16(tcrs[TMU1]) = TIMER_TPSC;
+        timer_disable_ints(TMU1);
+
+        timer_start(TMU1);
+    }
+
+    uptime_secs = 0;
+    uptime_ticks = 0;
+    tmu1_last = TIMER32(tcnts[TMU1]);
 }
 
-static void timer_ms_enable(void) {
-    irq_set_handler(EXC_TMU2_TUNI2, timer_ms_handler, NULL);
-    timer_prime(TMU2, 1, 1);
-    timer_ms_countdown = timer_count(TMU2);
-    timer_clear(TMU2);
-    timer_start(TMU2);
-}
-
-/* Generic function for retrieving the current time maintained by TMU2.
+/* Generic function for retrieving the current time maintained by TMU1.
    Returns the total amount of time that has elapsed since KOS has been
    initialized, in seconds + ticks. */
 timer_val_t __dreamcast_get_ticks(void) {
-    uint32_t secs, unf1, unf2, counter1, counter2, delta;
-    uint16_t tmu2;
+    uint32_t current, delta;
 
-    do {
-        /* Read the underflow flag twice, and the counter twice.
-           - If both flags are set, it's just unrealistic that one
-             second elapsed between the two reads, therefore we can
-             assume that the interrupt did not fire yet, and both
-             the timer value and the computation of "secs" are valid.
-           - If one underflow flag is set, and the other is not,
-             the timer value or the "secs" value cannot be trusted;
-             loop and try again.
-           - If both flags are cleared, either the timer did not
-             underflow, or it did but the interrupt handler was quick
-             enough to clear the flag, in which case the computation
-             of "secs" may be wrong. We can check that by reading
-             the timer value again, and if it's above the previous
-             value, the timer underflowed and we have to try again.
+    /* Unlike the old TMU2 implementation, this one is a read-modify-write on
+       shared state, and it is called both from thread context and from IRQ
+       context (thd_poll()), so it has to be atomic with respect to IRQs. */
+    irq_disable_scoped();
 
-           This complex setup avoids the issue where the timer
-           underflows between the moment where you compute the
-           seconds value, and the moment where you read the timer.
-           It also does not require the interrupts to be masked. */
-        counter1 = TIMER32(tcnts[TMU2]);
-        tmu2 = TIMER16(tcrs[TMU2]);
-        unf1 = !!(tmu2 & UNF);
-        secs = timer_ms_counter + unf1;
+    current = TIMER32(tcnts[TMU1]);
 
-        counter2 = TIMER32(tcnts[TMU2]);
-        tmu2 = TIMER16(tcrs[TMU2]);
-        unf2 = !!(tmu2 & UNF);
-    } while(__predict_false(unf1 != unf2 || counter1 < counter2));
+    /* TMU1 counts down and is never reloaded, so the ticks elapsed since the
+       previous call are just (previous - current). Evaluating that in 32-bit
+       unsigned arithmetic makes the counter's wrap fall out for free: it is
+       the same subtraction whether or not the counter passed through zero in
+       between, so no software wrap counter or underflow-flag polling is
+       needed here.
 
-    delta = timer_ms_countdown - counter2;
+       This does assume __dreamcast_get_ticks() is called more often than once
+       per wrap period -- 2^32 / 12468720 Hz, about 344 seconds -- because a
+       longer gap is indistinguishable from a shorter one. That assumption
+       holds comfortably in practice: the scheduler and cdrom_poll() both sit
+       on this clock and run on millisecond timescales. */
+    delta = tmu1_last - current;
+    tmu1_last = current;
 
-    return (timer_val_t){ .secs = secs, .ticks = delta, };
+    /* Reject implausible jumps; see TIMER_MAX_GAP_SECS. Keeping delta bounded
+       this way also keeps the accumulation below in 32-bit arithmetic. */
+    if(__predict_false(delta > TIMER_MAX_GAP_SECS * TIMER_TICK_RATE))
+        delta = 0;
+
+    uptime_ticks += delta;
+
+    while(__predict_false(uptime_ticks >= TIMER_TICK_RATE)) {
+        uptime_ticks -= TIMER_TICK_RATE;
+        uptime_secs++;
+    }
+
+    return (timer_val_t){ .secs = uptime_secs, .ticks = uptime_ticks, };
 }
 
 /* Primary kernel timer. What we'll do here is handle actual timer IRQs
@@ -329,17 +366,23 @@ void timer_primary_wakeup(uint32_t millis) {
 
 /* Init */
 int timer_init(void) {
-    /* Disable all timers */
-    TIMER8(TSTR) = 0;
+    /* Stop TMU0 and TMU2, but deliberately *not* TMU1: it backs the uptime
+       clock as a free-running counter, and if the application already
+       configured and started it we must not disturb it. */
+    TIMER8(TSTR) &= ~(BIT(TMU0) | BIT(TMU2));
 
     /* Set to internal clock source */
     TIMER8(TOCR) = 0;
 
+    /* Leave TMU2 fully idle -- stopped above, no prime, no handler, its
+       interrupt masked -- so the application is free to own it. */
+    timer_disable_ints(TMU2);
+
     /* Setup the primary timer stuff */
     timer_primary_init();
 
-    /* Setup the 1 HZ timer */
-    timer_ms_enable();
+    /* Setup the uptime clock (TMU1) */
+    timer_uptime_enable();
 
     return 0;
 }
