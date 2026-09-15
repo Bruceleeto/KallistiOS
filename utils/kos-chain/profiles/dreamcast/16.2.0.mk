@@ -5,8 +5,8 @@ target=sh-elf
 cpu_configure_args=--with-multilib-list=$(precision_modes) --with-endian=little --with-cpu=$(default_precision)
 
 # Toolchain versions for SH
-binutils_ver=2.46.1
-gcc_ver=16.1.0
+binutils_ver=2.47
+gcc_ver=16.2.0
 newlib_ver=4.6.0.20260123
 
 # GCC custom dependencies

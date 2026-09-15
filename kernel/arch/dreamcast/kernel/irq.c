@@ -163,7 +163,8 @@ void irq_dump_regs(int code, irq_t evt) {
                 dbglog(DBG_DEAD, " %08lx", irq_srt_addr->pr);
 
             while(arch_stk_unwind_step(sp, &ret_addr, &next_sp)) {
-                dbglog(DBG_DEAD, " %08x", ret_addr);
+                /* Log the call site (the BSR/BSRF/JSR itself) */
+                dbglog(DBG_DEAD, " %08x", ret_addr - 4);
                 sp = next_sp;
             }
         }
@@ -299,6 +300,7 @@ void arch_irq_create_context(irq_context_t *context,
     /* Setup the program frame */
     context->pc = (uint32_t)routine;
     context->sr = 0x40000000;   /* note: need to handle IMASK */
+    context->fpscr = __builtin_sh_get_fpscr();
     context->r[15] = stack_pointer;
     context->r[14] = 0xffffffff;
 
